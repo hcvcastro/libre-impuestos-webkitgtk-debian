@@ -1,3 +1,10 @@
+libre-impuestos-webkit (1.8.1-3.6) UNRELEASED; urgency=low
+
+  * Fixed. Break table rows each page. 
+  * Fixed. Calculation height header and footer.
+
+ -- Henry Castro <hcastro@noblewarrior>  Thu, 10 Jul 2014 10:38:57 -0400
+
 libre-impuestos-webkit (1.8.1-3.5) UNRELEASED; urgency=low
 
   * Patched with header and footer printing web pages.

@@ -1,0 +1,549 @@
+--- a/Source/WebCore/page/LibreImpuestoPrintContext.cpp
++++ b/Source/WebCore/page/LibreImpuestoPrintContext.cpp
+@@ -28,6 +28,16 @@
+ #include "FrameView.h"
+ #include "RenderLayer.h"
+ #include "RenderView.h"
++#include "HTMLElement.h"
++#include "HTMLNames.h"
++#include "HTMLTableCaptionElement.h"
++#include "HTMLTableCellElement.h"
++#include "HTMLTableElement.h"
++#include "HTMLTableRowElement.h"
++#include "RenderObject.h"
++#include "RenderTableCell.h"
++#include "RenderTableRow.h"
++#include "NodeList.h"
+ #include <wtf/text/WTFString.h>
+ #include "PlatformContextCairo.h"
+ 
+@@ -61,7 +71,7 @@
+ // Called after begin
+ void LibreImpuestoPrintContext::computePageRects(const FloatRect& printRect, float headerHeight, float footerHeight, float userScaleFactor, float& outPageHeight, bool allowHorizontalTiling)
+ {
+-  RenderView* view;
++    RenderView* view;
+ 
+     m_pageContentRects.clear();
+     m_pageHeaderRects.clear();
+@@ -75,15 +85,12 @@
+         return;
+     }
+ 
+-    view = toRenderView(m_headerFrame->document()->renderer());
+-    const IntRect& headerRect = view->documentRect();
+-
+-    view = toRenderView(m_footerFrame->document()->renderer());
+-    const IntRect& footerRect = view->documentRect();
+-
+     view = toRenderView(m_contentFrame->document()->renderer());
+     const IntRect& documentRect = view->documentRect();
+     FloatSize pageSize = m_contentFrame->resizePageRectsKeepingRatio(FloatSize(printRect.width(), printRect.height()), FloatSize(documentRect.width(), documentRect.height()));
++
++    pageSize.setHeight( pageSize.height() - headerHeight - footerHeight );
++
+     float pageWidth = pageSize.width();
+     float pageHeight = pageSize.height();
+ 
+@@ -91,9 +98,6 @@
+ 
+     computeHeaderPageRectsWithPageSizeInternal(FloatSize(pageWidth / userScaleFactor, pageHeight / userScaleFactor), allowHorizontalTiling);
+ 
+-    //pageHeight -= headerHeight + footerHeight;
+-    pageHeight -= headerRect.height() + footerRect.height();
+-
+     if (pageHeight <= 0) {
+         LOG_ERROR("pageHeight has bad value %.2f", pageHeight);
+         return;
+@@ -250,28 +254,172 @@
+     }
+ }
+ 
++bool LibreImpuestoPrintContext::insertHeader( RefPtr<HTMLTableRowElement>& head, RefPtr<Node>& tableBody, unsigned pageHeight)
++{
++  bool result = false;
++  LayoutPoint coord;
++  RefPtr<Node> row;
++  ExceptionCode ec = 0;
++  RenderObject* renderer;
++  RenderTableRow* renderTableRow;
++  PassRefPtr<NodeList> listRow =  tableBody->childNodes();	  
++
++  for(unsigned iterRow=0; iterRow < listRow->length(); iterRow++) {
++    row = listRow->item(iterRow);
++    renderer = row->renderer();
++    if ( renderer && renderer->isTableRow() ) {
++      renderTableRow = toRenderTableRow(renderer);
++      coord = roundedLayoutPoint(renderTableRow->localToAbsolute());
++      if ( (coord.y() % pageHeight) == 0 && 
++	   !row->isEqualNode(head->toNode()) ) {
++	tableBody->insertBefore(head->cloneElementWithChildren(), row.get(), ec);
++	result = true;
++	break;
++      }
++    }
++  }
++  return result;
++}
++
++void LibreImpuestoPrintContext::fillRows( float width, float height, float headerHeight, float footerHeight )
++{
++    RenderView* view;
++    view = toRenderView(m_contentFrame->document()->renderer());
++    const IntRect& documentRect = view->documentRect();
++
++    FloatSize originalPageSize = FloatSize(width, height);
++    FloatSize minLayoutSize = m_contentFrame->resizePageRectsKeepingRatio(originalPageSize, 
++									  FloatSize(documentRect.width(), documentRect.height()));
++
++    minLayoutSize.setHeight( minLayoutSize.height() - headerHeight - footerHeight);
++
++    Document* document = m_contentFrame->document();
++    HTMLElement* body = document->body();
++    RefPtr<HTMLTableRowElement> head;
++    RefPtr<Node> tableHead;
++    RefPtr<Node> tableBody;
++    RefPtr<Node> table;    
++
++    // Iterate all tables
++    PassRefPtr<NodeList> listTable = body->getElementsByTagName("table");
++    unsigned pageHeight = toRenderView(document->renderer())->pageLogicalHeight();
++    for (unsigned iterTable=0; iterTable < listTable->length(); iterTable++) {
++      table = listTable->item(iterTable);
++
++      // iterate all head sections
++      PassRefPtr<NodeList> listHead = table->getElementsByTagName("thead");
++      for(unsigned iterHead=0; iterHead < listHead->length(); iterHead++ ) {
++	tableHead = listHead->item(iterHead);
++
++	// iterate all rows
++	PassRefPtr<NodeList> listRow = tableHead->childNodes();
++	for(unsigned iterRow=0; iterRow < listRow->length(); iterRow++ ) {
++	  if (listRow->item(iterRow)->hasTagName(HTMLNames::trTag)) {
++	    head = static_cast<HTMLTableRowElement*>(listRow->item(iterRow));
++	    break;
++	  }
++	}
++      }
++
++      // if no header found .. continue.
++      if ( !head ) continue;
++
++      // iterate all body section
++      PassRefPtr<NodeList> listBody = table->getElementsByTagName("tbody");
++      for(unsigned iterBody=0; iterBody < listBody->length(); iterBody++) {
++	tableBody = listBody->item(iterBody);
++
++	while ( insertHeader( head, tableBody, pageHeight ))
++	  m_contentFrame->setPrinting(true, minLayoutSize, originalPageSize, printingMaximumShrinkFactor / printingMinimumShrinkFactor, AdjustViewSize);
++      }
++
++      head = 0;
++    }
++}
++
++void LibreImpuestoPrintContext::computeHeaderFooterHeight( float pageHeight,  float &headerHeight, float &footerHeight )
++{
++  RenderView* view;
++
++  view = toRenderView(m_headerFrame->document()->renderer());
++  const IntRect& headerRect = view->documentRect();
++  headerHeight = headerRect.height();
++
++  if (headerHeight >= pageHeight )
++    headerHeight = 0;
++
++  m_headerHeight = headerHeight;
++
++  view = toRenderView(m_footerFrame->document()->renderer());
++  const IntRect& footerRect = view->documentRect();
++  footerHeight = footerRect.height();
++
++  if (footerHeight >= pageHeight )
++    footerHeight = 0;
++
++  m_footerHeight = footerHeight;
++}
++
++
+ void LibreImpuestoPrintContext::begin(float width, float height)
+ {
+     // This function can be called multiple times to adjust printing parameters without going back to screen mode.
+     m_isPrinting = true;
+ 
+     FloatSize originalPageSize = FloatSize(width, height);
+-    FloatSize minLayoutSize = m_contentFrame->resizePageRectsKeepingRatio(originalPageSize, FloatSize(width * printingMinimumShrinkFactor, height * printingMinimumShrinkFactor));
++    FloatSize minLayoutSize = m_contentFrame->resizePageRectsKeepingRatio(originalPageSize, 
++									  FloatSize(width * printingMinimumShrinkFactor, height * printingMinimumShrinkFactor));
+ 
+     // This changes layout, so callers need to make sure that they don't paint to screen while in printing mode.
+     m_contentFrame->setPrinting(true, minLayoutSize, originalPageSize, printingMaximumShrinkFactor / printingMinimumShrinkFactor, AdjustViewSize);
+ 
+     // Header
+-    minLayoutSize = m_headerFrame->resizePageRectsKeepingRatio(originalPageSize, FloatSize(width * printingMinimumShrinkFactor, height * printingMinimumShrinkFactor));
++    minLayoutSize = m_headerFrame->resizePageRectsKeepingRatio(originalPageSize, 
++							       FloatSize(width * printingMinimumShrinkFactor, height * printingMinimumShrinkFactor));
+     m_headerFrame->setPrinting(true, minLayoutSize, originalPageSize, printingMaximumShrinkFactor / printingMinimumShrinkFactor, AdjustViewSize);
+ 
+     // Footer
+-    minLayoutSize = m_footerFrame->resizePageRectsKeepingRatio(originalPageSize, FloatSize(width * printingMinimumShrinkFactor, height * printingMinimumShrinkFactor));
++    minLayoutSize = m_footerFrame->resizePageRectsKeepingRatio(originalPageSize, 
++							       FloatSize(width * printingMinimumShrinkFactor, height * printingMinimumShrinkFactor));
+     m_footerFrame->setPrinting(true, minLayoutSize, originalPageSize, printingMaximumShrinkFactor / printingMinimumShrinkFactor, AdjustViewSize);
+ 
+ 
+ }
+ 
++void LibreImpuestoPrintContext::beginPage(float width, float height, float headerHeight, float footerHeight)
++{
++    RenderView* view;
++
++    // This function can be called multiple times to adjust printing parameters without going back to screen mode.
++    m_isPrinting = true;
++
++    view = toRenderView(m_contentFrame->document()->renderer());
++    const IntRect& documentRect = view->documentRect();
++
++    FloatSize originalPageSize = FloatSize(width, height);
++    FloatSize minLayoutSize = m_contentFrame->resizePageRectsKeepingRatio(originalPageSize, 
++									  FloatSize(documentRect.width(), documentRect.height()));
++
++    minLayoutSize.setHeight( minLayoutSize.height() - headerHeight - footerHeight);
++
++    // This changes layout, so callers need to make sure that they don't paint to screen while in printing mode.
++    m_contentFrame->setPrinting(true, minLayoutSize, originalPageSize, printingMaximumShrinkFactor / printingMinimumShrinkFactor, AdjustViewSize);
++
++    // Header
++    minLayoutSize = m_headerFrame->resizePageRectsKeepingRatio(originalPageSize, 
++							       FloatSize(documentRect.width(), documentRect.height()));
++    m_headerFrame->setPrinting(true, minLayoutSize, originalPageSize, printingMaximumShrinkFactor / printingMinimumShrinkFactor, AdjustViewSize);
++
++    // Footer
++    minLayoutSize = m_footerFrame->resizePageRectsKeepingRatio(originalPageSize, 
++							       FloatSize(documentRect.width(), documentRect.height()));
++    m_footerFrame->setPrinting(true, minLayoutSize, originalPageSize, printingMaximumShrinkFactor / printingMinimumShrinkFactor, AdjustViewSize);
++
++
++}
++
++
++
+ float LibreImpuestoPrintContext::computeAutomaticScaleFactor(const FloatSize& availablePaperSize)
+ {
+     if (!m_contentFrame->view())
+@@ -293,21 +441,12 @@
+ void LibreImpuestoPrintContext::spoolPage(GraphicsContext& ctx, int pageNumber, float width)
+ {
+     // FIXME: Not correct for vertical text.
+-  IntRect pageHeaderRect = m_pageHeaderRects[0];
+   IntRect pageContentRect = m_pageContentRects[pageNumber];
+   float scale = width / pageContentRect.width();
+ 
+-  //double x = 0 ,y = 0;
+-  
+-  const IntRect& headerRect = toRenderView(m_headerFrame->document()->renderer())->documentRect();
+-
+-  const IntRect& footerRect = toRenderView(m_footerFrame->document()->renderer())->documentRect();
+-
+-  /*PlatformGraphicsContext * pg = ctx.platformContext();
++  const IntRect& headerRect = IntRect(0, 0, pageContentRect.width(), m_headerHeight);
++  const IntRect& footerRect = IntRect(0, 0, pageContentRect.width(), m_footerHeight);
+ 
+-  cairo_t* cr = pg->cr();
+-    cairo_user_to_device(cr, &x, &y);*/
+-  
+   ctx.save();
+   ctx.scale(FloatSize(scale, scale));
+   ctx.translate(-pageContentRect.x(), -pageContentRect.y() + headerRect.height());
+--- a/Source/WebCore/page/LibreImpuestoPrintContext.h
++++ b/Source/WebCore/page/LibreImpuestoPrintContext.h
+@@ -25,6 +25,7 @@
+ 
+ #include <wtf/Forward.h>
+ #include <wtf/Vector.h>
++#include "HTMLTableRowElement.h"
+ 
+ namespace WebCore {
+ 
+@@ -63,6 +64,7 @@
+     // Enter print mode, updating layout for new page size.
+     // This function can be called multiple times to apply new print options without going back to screen mode.
+     void begin(float width, float height = 0);
++    void beginPage(float width, float height = 0, float headerHeight = 0, float footerHeight = 0);
+ 
+     // FIXME: eliminate width argument.
+     void spoolPage(GraphicsContext& ctx, int pageNumber, float width);
+@@ -82,6 +84,8 @@
+     // The height of the graphics context should be
+     // (pageSizeInPixels.height() + 1) * number-of-pages - 1
+     static void spoolAllPagesWithBoundaries(Frame*, GraphicsContext&, const FloatSize& pageSizeInPixels);
++    void computeHeaderFooterHeight(float pageHeight,  float& headerHeight, float& footerHeight );
++    void fillRows(float width, float height, float headerHeight, float footerHeight);
+ 
+ protected:
+     Frame* m_contentFrame;
+@@ -89,11 +93,13 @@
+     Frame* m_footerFrame;
+     Vector<IntRect> m_pageContentRects;
+     Vector<IntRect> m_pageHeaderRects;
++    LayoutUnit m_headerHeight;
++    LayoutUnit m_footerHeight;
+ 
+ private:
+     void computePageRectsWithPageSizeInternal(const FloatSize& pageSizeInPixels, bool allowHorizontalTiling);
+     void computeHeaderPageRectsWithPageSizeInternal(const FloatSize& pageSizeInPixels, bool allowHorizontalTiling);
+-
++    bool insertHeader( RefPtr<HTMLTableRowElement>&, RefPtr<Node>&, unsigned);
+ 
+     // Used to prevent misuses of begin() and end() (e.g., call end without begin).
+     bool m_isPrinting;
+--- a/Source/WebCore/rendering/RenderTable.cpp
++++ b/Source/WebCore/rendering/RenderTable.cpp
+@@ -400,6 +400,8 @@
+         setLogicalHeight(logicalHeight() + computedLogicalHeight);
+     }
+ 
++    LayoutUnit oldLogicalHeight = logicalHeight();
++
+     LayoutUnit sectionLogicalLeft = style()->isLeftToRightDirection() ? borderStart() : borderEnd();
+     if (!collapsing)
+         sectionLogicalLeft += style()->isLeftToRightDirection() ? paddingStart() : paddingEnd();
+@@ -417,6 +419,19 @@
+         section = sectionBelow(section);
+     }
+ 
++    /* Begin Patched by Henry Castro <hcvcastro@gmail.com>  */
++    if (view()->layoutState()->pageLogicalHeight()) {
++      setLogicalHeight(oldLogicalHeight);
++      section = topSection();
++      while (section) {
++	section->layoutPaginatedRows();
++        section->setLogicalTop(logicalHeight());
++	setLogicalHeight(logicalHeight() + section->logicalHeight());
++	section = sectionBelow(section);
++      }
++    }
++    /* End Patched by Henry Casro <hcvcastro@gmail.com>   */
++
+     setLogicalHeight(logicalHeight() + borderAndPaddingAfter);
+ 
+     for (unsigned i = 0; i < m_captions.size(); i++) {
+--- a/Source/WebCore/rendering/RenderTableSection.cpp
++++ b/Source/WebCore/rendering/RenderTableSection.cpp
+@@ -423,9 +423,17 @@
+ 
+ void RenderTableSection::layout()
+ {
++  LayoutUnit pageHeight = 0;
++  LayoutUnit pageHeightChanged = false;
+     ASSERT(needsLayout());
+ 
+-    LayoutStateMaintainer statePusher(view(), this, locationOffset(), style()->isFlippedBlocksWritingMode());
++    if (document()->printing()) {
++      // We disable page height to get correct cell heights
++      pageHeight = INT_MAX;
++      pageHeightChanged = true;
++    }
++
++    LayoutStateMaintainer statePusher(view(), this, locationOffset(), style()->isFlippedBlocksWritingMode(), pageHeight, pageHeightChanged);
+     for (RenderObject* child = children()->firstChild(); child; child = child->nextSibling()) {
+         if (child->isTableRow()) {
+             child->layoutIfNeeded();
+@@ -518,19 +526,27 @@
+     int vspacing = table()->vBorderSpacing();
+     unsigned nEffCols = table()->numEffCols();
+ 
+-    LayoutStateMaintainer statePusher(view(), this, LayoutSize(x(), y()), style()->isFlippedBlocksWritingMode());
++  LayoutUnit pageHeight = 0;
++  LayoutUnit pageHeightChanged = false;
++
++
++  if (document()->printing()) {
++    // We disable page height to get correct cell heights
++    pageHeight = INT_MAX;
++    pageHeightChanged = true;
++  }
++
++  LayoutStateMaintainer statePusher(view(), this, LayoutSize(x(), y()), style()->isFlippedBlocksWritingMode(), pageHeight, pageHeightChanged);
+ 
+     for (unsigned r = 0; r < totalRows; r++) {
+         // Set the row's x/y position and width/height.
+         if (RenderTableRow* rowRenderer = m_grid[r].rowRenderer) {
+-            rowRenderer->setLocation(LayoutPoint(0, m_rowPos[r]));
++	     rowRenderer->setLocation(LayoutPoint(0, m_rowPos[r]));
+             rowRenderer->setLogicalWidth(logicalWidth());
+             rowRenderer->setLogicalHeight(m_rowPos[r + 1] - m_rowPos[r] - vspacing);
+             rowRenderer->updateLayerTransform();
+         }
+ 
+-        int rowHeightIncreaseForPagination = 0;
+-
+         for (unsigned c = 0; c < nEffCols; c++) {
+             CellStruct& cs = cellAt(r, c);
+             RenderTableCell* cell = cs.primaryCell();
+@@ -657,8 +673,6 @@
+ 
+             // FIXME: Make pagination work with vertical tables.
+             if (style()->isHorizontalWritingMode() && view()->layoutState()->pageLogicalHeight() && cell->height() != rHeight) {
+-                if (cell->logicalHeight() > rHeight)
+-                    rowHeightIncreaseForPagination = max<int>(rowHeightIncreaseForPagination, cell->logicalHeight() - rHeight);
+                 cell->setLogicalHeight(rHeight);
+ 	    }
+ 
+@@ -673,17 +687,6 @@
+                     cell->repaintDuringLayoutIfMoved(oldCellRect);
+             }
+         }
+-
+-        if (rowHeightIncreaseForPagination) {
+-            for (unsigned rowIndex = r + 1; rowIndex <= totalRows; rowIndex++)
+-                m_rowPos[rowIndex] += rowHeightIncreaseForPagination;
+-            for (unsigned c = 0; c < nEffCols; ++c) {
+-                Vector<RenderTableCell*, 1>& cells = cellAt(r, c).cells;
+-                for (size_t i = 0; i < cells.size(); ++i)
+-                    cells[i]->setLogicalHeight(cells[i]->logicalHeight() + rowHeightIncreaseForPagination);
+-            }
+-        }
+-
+     }
+ 
+ #ifndef NDEBUG
+@@ -731,6 +734,66 @@
+     return height();
+ }
+ 
++void RenderTableSection::layoutPaginatedRows()
++{
++  //LayoutUnit logicalTopBox = logicalTop();
++  //LayoutUnit logicalOffset = 0;
++  LayoutUnit pageStruct = 0;
++  RenderTable* table = this->table();
++  //LayoutUnit pageLogicalHeight = table->pageLogicalHeightForOffset(logicalOffset);  
++  LayoutUnit pageRemaining;
++  LayoutUnit pageTopRemaining;
++  LayoutUnit pageBotRemaining;
++  LayoutUnit rowHeight;
++  unsigned totalRows = m_grid.size();
++  unsigned nEffCols = table->numEffCols();
++  //int vspacing = table->vBorderSpacing();
++
++  LayoutStateMaintainer statePusher(view(), this, locationOffset(), style()->isFlippedBlocksWritingMode());
++
++  /* Check first case before priting first row*/
++  pageStruct = 0;  // assume 0 offset
++  rowHeight = 0;
++
++  for (unsigned row = 0; row < totalRows; row++) {
++    pageRemaining = 0;
++    pageTopRemaining = table->pageRemainingLogicalHeightForOffset(m_rowPos[row] + pageStruct);
++    pageBotRemaining = table->pageRemainingLogicalHeightForOffset(m_rowPos[row + 1] + pageStruct);
++
++    if (RenderTableRow* rowRenderer = m_grid[row].rowRenderer) {
++      rowHeight = m_rowPos[row + 1] - m_rowPos[row];// - vspacing;
++
++      if ( pageTopRemaining > pageBotRemaining ) {
++	if ( rowHeight > pageBotRemaining )
++	  pageRemaining = pageBotRemaining;
++	  ;//rowRenderer->setLogicalHeight(pageRemaining + rowHeight);
++      } else {
++	pageStruct += pageTopRemaining;
++	pageRemaining = 0;
++      }
++
++      rowRenderer->setLogicalTop(m_rowPos[row] + pageStruct);	    
++      rowRenderer->updateLayerTransform();
++    }
++
++    for (unsigned col = 0; col < nEffCols; col++) {
++      CellStruct& cs = cellAt(row, col);
++      RenderTableCell* cell = cs.primaryCell();
++
++      if (!cell || cs.inColSpan)
++	continue;
++
++      cell->setLogicalTop(m_rowPos[row] + pageStruct);
++
++    }
++    pageStruct += pageRemaining;
++  }
++  
++  statePusher.pop();
++  setLogicalHeight(m_rowPos[totalRows] + pageStruct );
++
++}
++
+ int RenderTableSection::calcOuterBorderBefore() const
+ {
+     unsigned totalCols = table()->numEffCols();
+@@ -1051,6 +1114,10 @@
+         // binary search to find a row
+         startrow = std::lower_bound(m_rowPos.begin(), m_rowPos.end(), before) - m_rowPos.begin();
+ 
++	// FIXME,  pagination
++	if (document()->printing())
++	  startrow = 0;
++
+         // The binary search above gives us the first row with
+         // a y position >= the top of the paint rect. Thus, the previous
+         // may need to be repainted as well.
+@@ -1059,6 +1126,11 @@
+ 
+         LayoutUnit after = (style()->isHorizontalWritingMode() ? localRepaintRect.maxY() : localRepaintRect.maxX()) + os;
+         endrow = std::lower_bound(m_rowPos.begin(), m_rowPos.end(), after) - m_rowPos.begin();
++
++	// FIXME, pagination
++	if (document()->printing())
++	  endrow = m_rowPos.size();
++
+         if (endrow == m_rowPos.size())
+           --endrow;
+ 
+--- a/Source/WebCore/rendering/RenderTableSection.h
++++ b/Source/WebCore/rendering/RenderTableSection.h
+@@ -57,6 +57,7 @@
+     void setCellLogicalWidths();
+     int calcRowLogicalHeight();
+     int layoutRows(int logicalHeight);
++    void layoutPaginatedRows();
+ 
+     RenderTable* table() const { return toRenderTable(parent()); }
+ 
+--- a/Source/WebKit/gtk/webkit/libre-impuestos-webkitwebframe.cpp
++++ b/Source/WebKit/gtk/webkit/libre-impuestos-webkitwebframe.cpp
+@@ -80,13 +80,21 @@
+     float height = gtk_print_context_get_height(context);
+     FloatRect printRect = FloatRect(0, 0, width, height);
+ 
+-    printContext->begin(width, height);
++    // first begin height 0
++    printContext->begin(width, 0);
+ 
+-    // TODO: Margin adjustments and header/footer support
+     float headerHeight = 0;
+     float footerHeight = 0;
+-    float pageHeight; // height of the page adjusted by margins
++    float pageHeight = height;   // height of the page adjusted by margins
++
++    printContext->computeHeaderFooterHeight( pageHeight, headerHeight, footerHeight);
++
++    printContext->beginPage(width, height, headerHeight, footerHeight);
++
++    printContext->fillRows(width, height, headerHeight, footerHeight);
++
+     printContext->computePageRects(printRect, headerHeight, footerHeight, 1.0, pageHeight);
++
+     gtk_print_operation_set_n_pages(op, printContext->pageCount());
+ }
+ 
+--- a/ChangeLog
++++ b/ChangeLog
+@@ -1,3 +1,9 @@
++2014-06-28  Henry Castr <hcvcastro@gmail.com>
++
++	Fixed Table Rows break page when printing
++	Added. Header and Footer page.
++
++	
+ 2012-03-28  Sergio Villar Senin  <svillar@igalia.com>
+ 
+         [Soup] DNS prefetching spams resolver, shoots self in the foot
